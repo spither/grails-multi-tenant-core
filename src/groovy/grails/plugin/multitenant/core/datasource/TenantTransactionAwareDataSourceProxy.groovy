@@ -3,7 +3,11 @@ package grails.plugin.multitenant.core.datasource;
 import grails.plugin.multitenant.core.CurrentTenant;
 import grails.plugin.multitenant.core.InvalidTenantException;
 import org.apache.log4j.Logger;
+import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.apache.commons.dbcp.BasicDataSource;
+import org.codehaus.groovy.grails.commons.ApplicationHolder;
+import org.codehaus.groovy.grails.commons.GrailsApplication;
 
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -23,9 +27,13 @@ public class TenantTransactionAwareDataSourceProxy extends TransactionAwareDataS
      */
     private DataSourceUrlResolver dataSourceUrlResolver;
     /**
-     * This is the thread local tenant that is active at the time of the interation with the class.
+     * This is the thread local tenant that is active at the time of the interaction with the class.
      */
     private CurrentTenant currentTenant;
+    /**
+     * Cache for tenant data sources
+     */
+    private Map<String, DataSource> tenantDataSources = new HashMap<String, DataSource>();
     /**
      * This allows the TenantBeanFactoryPostProcessor to assign a proxy to this object in spring since there is one of
      * these for each client.
@@ -77,10 +85,7 @@ public class TenantTransactionAwareDataSourceProxy extends TransactionAwareDataS
             }
             try
             {
-                // TODO Support other than JNDI Data Sources
-                // TODO Either cache the context lookup or cache the data source for performance
-                Context ctx = new InitialContext();
-                ds = (DataSource) ctx.lookup(jndiNameForTenant);
+                ds = findTenantDataSource(jndiNameForTenant);
             }
             catch (Exception ex)
             {
@@ -113,5 +118,54 @@ public class TenantTransactionAwareDataSourceProxy extends TransactionAwareDataS
     public void setCurrentTenant(CurrentTenant inCurrentTenant)
     {
         this.currentTenant = inCurrentTenant;
+    }
+
+    private DataSource findTenantDataSource(String url)
+    {
+        if(tenantDataSources.containsKey(url))
+        {
+            return tenantDataSources.get(url);
+        }
+
+        // TODO Support other than JNDI Data Sources
+        // TODO Either cache the context lookup or cache the data source for performance
+        if(url.startsWith("java"))
+        {
+            Context ctx = new InitialContext();
+            return tenantDataSources.put(url, (DataSource) ctx.lookup(url));
+        }
+        else
+        {
+            GrailsApplication app = ApplicationHolder.getApplication();
+            Object dsConf = app.config.dataSource;
+            def newDataSource
+            if (dsConf.pooled) {
+                newDataSource = new BasicDataSource();
+            }
+            else {
+                newDataSource = new DriverManagerDataSource();
+            }
+
+            newDataSource.setDriverClassName(dsConf.driverClassName);
+            newDataSource.setUrl(url);
+            newDataSource.setUsername(dsConf.username);
+            newDataSource.setPassword(dsConf.password);
+
+            Object dsProps = dsConf.properties;
+            if (dsProps != null) {
+                if (dsProps instanceof Map) {
+                    dsProps.each { entry ->
+                        log.debug("Setting property on dataSource bean ${entry.key} -> ${entry.value}")
+                        newDataSource."${entry.key.toString}" = entry.value
+                    }
+                }
+                else {
+                    log.warn("dataSource.properties is not an instanceof java.util.Map, ignoring")
+                }
+            }
+
+            tenantDataSources.put(url, newDataSource);
+			return newDataSource;
+        }
     }
 }
